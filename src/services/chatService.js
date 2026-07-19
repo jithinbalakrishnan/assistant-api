@@ -1,20 +1,12 @@
-// function generateReply(name, message) {
-//   const reply = `Hello ${name}! Nice to meet you. How can I assist you today?`;
-//   return { reply };
-// }
-
-// module.exports = {
-//   generateReply,
-// };
-
 const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+const config = require('../config');
 
-const client = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
+const client = new BedrockRuntimeClient({ region: config.awsRegion });
 
 async function generateReply(name, message) {
   const command = new ConverseCommand({
-    modelId: 'arn:aws:bedrock:ap-south-1:567355540277:inference-profile/apac.amazon.nova-micro-v1:0',
-    system: [{ text: `You are a helpful assistant. The user's name is ${name}.` }],
+    modelId: config.bedrockModelId,
+    system: [{ text: config.systemPrompt }],
     messages: [
       {
         role: 'user',
@@ -22,8 +14,8 @@ async function generateReply(name, message) {
       },
     ],
     inferenceConfig: {
-      maxTokens: 512,
-      temperature: 0.7,
+      maxTokens: config.bedrockMaxTokens,
+      temperature: config.bedrockTemperature,
     },
   });
 

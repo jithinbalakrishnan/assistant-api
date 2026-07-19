@@ -46,6 +46,10 @@ The server starts on `http://localhost:4000` by default (configurable via `.env`
 | ------------- | ----------------------------------------- | ------------------------ |
 | `PORT`        | Port the server listens on                | `4000`                   |
 | `CORS_ORIGIN` | Allowed origin for CORS (the frontend URL)| `http://localhost:5173`  |
+| `AWS_REGION` | AWS region used by the Bedrock client | `ap-south-1` |
+| `BEDROCK_MODEL_ID` | Bedrock model or inference-profile ID | Required |
+| `BEDROCK_MAX_TOKENS` | Maximum generated tokens | `512` |
+| `BEDROCK_TEMPERATURE` | Generation randomness (`0`-`1`) | `0.7` |
 
 ## API
 
@@ -72,8 +76,8 @@ Health check. Returns `{ "status": "ok" }`.
 }
 ```
 
-The reply is currently hardcoded — no AI provider is integrated yet. `name` and `message`
-are both required, non-empty strings; otherwise a `400` error is returned.
+The API calls Amazon Bedrock through its Converse API. `name` and `message` are both
+required, non-empty strings; otherwise a `400` error is returned.
 
 ## Error Format
 
