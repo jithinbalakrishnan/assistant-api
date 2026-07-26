@@ -1,4 +1,5 @@
 const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+const { startObservation, propagateAttributes } = require('@langfuse/tracing');
 const crypto = require('node:crypto');
 const config = require('../config');
 const priceService = require('./priceService');
@@ -87,11 +88,14 @@ function stripThinking(text) {
 // and every loop iteration is a billed Bedrock call.
 const MAX_ITERATIONS = 5;
 
-async function generateReply(name, message, abortSignal) {
-  // Short id to tag all log lines of this one chat request,
-  // so logs from two users chatting at once don't get mixed up.
-  const requestId = crypto.randomUUID().slice(0, 8);
-
+// This is the same loop as before, but now it also sends what happens to
+// Langfuse so we can see it on the dashboard. Langfuse has three levels and
+// they match our loop nicely:
+//   trace      = one /chat request
+//   generation = one model call (one iteration)
+//   tool       = one tool call like get_price
+// If the Langfuse keys are missing these lines simply do nothing.
+async function runLoop(requestId, message, abortSignal, trace) {
   // The conversation the model sees. It grows on every loop iteration.
   const messages = [
     {
@@ -114,7 +118,41 @@ async function generateReply(name, message, abortSignal) {
       },
     });
 
-    const response = await client.send(command, { abortSignal });
+    // In Langfuse a model call is called a "generation".
+    // We send the token counts too, because that is what Langfuse uses
+    // to work out how much the request cost.
+    const generation = trace.startObservation(
+      `model-call-${iteration}`,
+      {
+        model: config.bedrockModelId,
+        input: messages,
+        modelParameters: {
+          maxTokens: config.bedrockMaxTokens,
+          temperature: config.bedrockTemperature,
+        },
+      },
+      { asType: 'generation' },
+    );
+
+    let response;
+    try {
+      response = await client.send(command, { abortSignal });
+    } catch (err) {
+      generation.update({ level: 'ERROR', statusMessage: err.message });
+      generation.end();
+      throw err;
+    }
+
+    generation.update({
+      output: response.output.message,
+      usageDetails: {
+        input: response.usage.inputTokens,
+        output: response.usage.outputTokens,
+        total: response.usage.totalTokens,
+      },
+      metadata: { stopReason: response.stopReason },
+    });
+    generation.end();
 
     console.log(
       `[${requestId}] iteration ${iteration} <- stopReason: ${response.stopReason} ` +
@@ -140,14 +178,19 @@ async function generateReply(name, message, abortSignal) {
       const { toolUseId, name: toolName, input } = block.toolUse;
       console.log(`[${requestId}] tool requested: ${toolName} ${JSON.stringify(input)}`);
 
+      const toolSpan = trace.startObservation(toolName, { input }, { asType: 'tool' });
+
       let result;
       try {
         result = await runTool(toolName, input);
+        toolSpan.update({ output: result });
       } catch (err) {
         // Tool failures go back to the model as data, so it can apologize or
         // try a different symbol instead of the whole request crashing.
         result = { error: err.message };
+        toolSpan.update({ output: result, level: 'ERROR', statusMessage: err.message });
       }
+      toolSpan.end();
 
       console.log(`[${requestId}] tool result: ${JSON.stringify(result)}`);
 
@@ -167,6 +210,31 @@ async function generateReply(name, message, abortSignal) {
   // Only reached if the model kept asking for tools MAX_ITERATIONS times in a row.
   console.log(`[${requestId}] gave up after ${MAX_ITERATIONS} iterations`);
   return { reply: 'Sorry, I could not finish answering that. Please try asking in a simpler way.' };
+}
+
+async function generateReply(name, message, abortSignal) {
+  // Short id to tag all log lines of this one chat request,
+  // so logs from two users chatting at once don't get mixed up.
+  const requestId = crypto.randomUUID().slice(0, 8);
+
+  // This puts the user's name on everything we send inside, so on the
+  // Langfuse dashboard we can filter by user and see the cost per user.
+  return propagateAttributes({ userId: name }, async () => {
+    const trace = startObservation('chat', { input: message });
+
+    try {
+      const result = await runLoop(requestId, message, abortSignal, trace);
+      trace.update({ output: result.reply });
+      return result;
+    } catch (err) {
+      trace.update({ level: 'ERROR', statusMessage: err.message });
+      throw err;
+    } finally {
+      // Always end the trace, even when there is an error or the user
+      // cancels. If we forget to end it, it never shows up in Langfuse.
+      trace.end();
+    }
+  });
 }
 
 module.exports = {
