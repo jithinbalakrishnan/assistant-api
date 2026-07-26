@@ -26,6 +26,7 @@ const config = {
   bedrockModelId: requiredString(process.env.BEDROCK_MODEL_ID, 'BEDROCK_MODEL_ID'),
   bedrockMaxTokens: parsePositiveInteger(process.env.BEDROCK_MAX_TOKENS, 512),
   bedrockTemperature: parseTemperature(process.env.BEDROCK_TEMPERATURE, 0.7),
+  bedrockRequestTimeoutMs: parsePositiveInteger(process.env.BEDROCK_REQUEST_TIMEOUT_MS, 25000),
   systemPrompt: 'You are a helpful assistant.',
 };
 

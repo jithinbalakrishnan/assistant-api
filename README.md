@@ -50,6 +50,7 @@ The server starts on `http://localhost:4000` by default (configurable via `.env`
 | `BEDROCK_MODEL_ID` | Bedrock model or inference-profile ID | Required |
 | `BEDROCK_MAX_TOKENS` | Maximum generated tokens | `512` |
 | `BEDROCK_TEMPERATURE` | Generation randomness (`0`-`1`) | `0.7` |
+| `BEDROCK_REQUEST_TIMEOUT_MS` | Maximum wait before cancelling a Bedrock request | `25000` |
 
 ## API
 
