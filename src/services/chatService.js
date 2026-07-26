@@ -1,30 +1,145 @@
 const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+const crypto = require('node:crypto');
 const config = require('../config');
+const priceService = require('./priceService');
 
 const client = new BedrockRuntimeClient({ region: config.awsRegion });
 
-async function generateReply(name, message, abortSignal) {
-  const command = new ConverseCommand({
-    modelId: config.bedrockModelId,
-    system: [{ text: config.systemPrompt }],
-    messages: [
-      {
-        role: 'user',
-        content: [{ text: message }],
+// ---------------------------------------------------------------------------
+// Tool definitions — the "menu" of functions Nova is allowed to ask for.
+// Nova never runs these itself. It sends back a structured request
+// ("please call get_price with symbol=RELIANCE.NS") and OUR code runs it.
+// The description is important: it is how Nova learns when to use the tool
+// and which symbol format to use.
+// ---------------------------------------------------------------------------
+const toolConfig = {
+  tools: [
+    {
+      toolSpec: {
+        name: 'get_price',
+        description:
+          'Get the live market price of a stock, commodity future, currency pair, or index ' +
+          'from Yahoo Finance. Symbol conventions: Indian NSE stocks end with .NS ' +
+          '(RELIANCE.NS, TCS.NS, HDFCBANK.NS). Crude oil futures: CL=F for WTI, BZ=F for Brent. ' +
+          'US Dollar to Indian Rupee rate: INR=X. Nifty 50 index: ^NSEI. Sensex: ^BSESN. Gold: GC=F.',
+        inputSchema: {
+          json: {
+            type: 'object',
+            properties: {
+              symbol: {
+                type: 'string',
+                description: 'The Yahoo Finance symbol, e.g. RELIANCE.NS or CL=F',
+              },
+            },
+            required: ['symbol'],
+          },
+        },
       },
-    ],
-    inferenceConfig: {
-      maxTokens: config.bedrockMaxTokens,
-      temperature: config.bedrockTemperature,
     },
-  });
+  ],
+};
 
-  const response = await client.send(command, { abortSignal });
-  console.log(JSON.stringify(response, null, 2));
-  
-  const reply = response.output.message.content[0].text;
+// Runs the tool Nova asked for. When we add more tools later
+// (search_symbol, get_history, ...), they get dispatched from here.
+async function runTool(toolName, input) {
+  if (toolName === 'get_price') {
+    return priceService.getPrice(input.symbol);
+  }
 
-  return { reply };
+  // Nova asked for a tool we don't have — answer with an error instead of crashing.
+  return { error: `Unknown tool: ${toolName}` };
+}
+
+// Nova models plan out loud in <thinking> tags when tools are enabled.
+// That is meant for the model, not the user — strip it from the final reply.
+function stripThinking(text) {
+  return text.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim();
+}
+
+// Safety cap: a confused model could keep asking for tools forever,
+// and every loop iteration is a billed Bedrock call.
+const MAX_ITERATIONS = 5;
+
+async function generateReply(name, message, abortSignal) {
+  // Short id to tag all log lines of this one chat request,
+  // so logs from two users chatting at once don't get mixed up.
+  const requestId = crypto.randomUUID().slice(0, 8);
+
+  // The conversation Nova sees. It grows on every loop iteration.
+  const messages = [
+    {
+      role: 'user',
+      content: [{ text: message }],
+    },
+  ];
+
+  for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration += 1) {
+    console.log(`[${requestId}] iteration ${iteration} -> calling Nova`);
+
+    const command = new ConverseCommand({
+      modelId: config.bedrockModelId,
+      system: [{ text: config.systemPrompt }],
+      messages,
+      toolConfig,
+      inferenceConfig: {
+        maxTokens: config.bedrockMaxTokens,
+        temperature: config.bedrockTemperature,
+      },
+    });
+
+    const response = await client.send(command, { abortSignal });
+
+    console.log(
+      `[${requestId}] iteration ${iteration} <- stopReason: ${response.stopReason} ` +
+        `(input ${response.usage.inputTokens} / output ${response.usage.outputTokens} tokens)`,
+    );
+
+    // Whatever Nova replied becomes part of the conversation history.
+    messages.push(response.output.message);
+
+    if (response.stopReason !== 'tool_use') {
+      // Nova is done — find the text block and return it.
+      const textBlock = response.output.message.content.find((block) => block.text);
+      console.log(`[${requestId}] done after ${iteration} iteration(s)`);
+      return { reply: textBlock ? stripThinking(textBlock.text) : '' };
+    }
+
+    // Nova asked for one or more tools. Run each one and collect the results.
+    const toolResults = [];
+
+    for (const block of response.output.message.content) {
+      if (!block.toolUse) continue;
+
+      const { toolUseId, name: toolName, input } = block.toolUse;
+      console.log(`[${requestId}] tool requested: ${toolName} ${JSON.stringify(input)}`);
+
+      let result;
+      try {
+        result = await runTool(toolName, input);
+      } catch (err) {
+        // Tool failures go back to Nova as data, so it can apologize or
+        // try a different symbol instead of the whole request crashing.
+        result = { error: err.message };
+      }
+
+      console.log(`[${requestId}] tool result: ${JSON.stringify(result)}`);
+
+      toolResults.push({
+        toolResult: {
+          toolUseId, // ticket number — matches this result to Nova's request
+          content: [{ json: result }],
+        },
+      });
+    }
+
+    // Tool results are sent back as a "user" message, then the loop repeats
+    // and Nova reads the conversation again — now with the data it asked for.
+    messages.push({ role: 'user', content: toolResults });
+  }
+
+  // Only reached if Nova kept asking for tools MAX_ITERATIONS times in a row.
+  console.log(`[${requestId}] gave up after ${MAX_ITERATIONS} iterations`);
+  return { reply: 'Sorry, I could not finish answering that. Please try asking in a simpler way.' };
 }
 
 module.exports = {
