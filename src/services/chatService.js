@@ -6,24 +6,24 @@ const priceService = require('./priceService');
 const client = new BedrockRuntimeClient({ region: config.awsRegion });
 
 // ---------------------------------------------------------------------------
-// Tool definitions — the "menu" of functions Nova is allowed to ask for.
-// Nova never runs these itself. It sends back a structured request
+// Tool definitions — the "menu" of functions the model is allowed to ask for.
+// The model never runs these itself. It sends back a structured request
 // ("please call get_price with symbol=RELIANCE.NS") and OUR code runs it.
-// The description is important: it is how Nova learns when to use the tool
+// The description is important: it is how the model learns when to use the tool
 // and which symbol format to use.
 // ---------------------------------------------------------------------------
 const toolConfig = {
-  tools: [
+  tools: [ // an array — you can offer several tools
     {
-      toolSpec: {
-        name: 'get_price',
-        description:
+      toolSpec: { // one tool's specification
+        name: 'get_price', // the name the model will send back when requesting it
+        description: // WHEN to use it (the model reads this to decide)
           'Get the live market price of a stock, commodity future, currency pair, or index ' +
           'from Yahoo Finance. Symbol conventions: Indian NSE stocks end with .NS ' +
           '(RELIANCE.NS, TCS.NS, HDFCBANK.NS). Crude oil futures: CL=F for WTI, BZ=F for Brent. ' +
           'US Dollar to Indian Rupee rate: INR=X. Nifty 50 index: ^NSEI. Sensex: ^BSESN. Gold: GC=F.',
         inputSchema: {
-          json: {
+          json: { // JSON Schema — the shape of arguments allowed
             type: 'object',
             properties: {
               symbol: {
@@ -36,21 +36,48 @@ const toolConfig = {
         },
       },
     },
+    {
+      toolSpec: {
+        name: 'search_symbol',
+        description: // fallback only — call this when get_price failed or the symbol is unknown
+          'Find the Yahoo Finance symbol for a company name. Do NOT use this for well-known ' +
+          'symbols listed in the get_price description — call get_price directly for those. ' +
+          'Use this only for companies whose symbol you do not know, or after a get_price ' +
+          'call returned an error. Returns several matches across exchanges; pick the one ' +
+          'matching the exchange the user means (prefer .NS for Indian companies).',
+        inputSchema: {
+          json: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: 'The company name to search for, e.g. Tata Motors',
+              },
+            },
+            required: ['query'],
+          },
+        },
+      },
+    },
   ],
 };
 
-// Runs the tool Nova asked for. When we add more tools later
+// Runs the tool the model asked for. When we add more tools later
 // (search_symbol, get_history, ...), they get dispatched from here.
 async function runTool(toolName, input) {
   if (toolName === 'get_price') {
     return priceService.getPrice(input.symbol);
   }
 
-  // Nova asked for a tool we don't have — answer with an error instead of crashing.
+  if (toolName === 'search_symbol') {
+    return priceService.searchSymbol(input.query);
+  }
+
+  // The model asked for a tool we don't have — answer with an error instead of crashing.
   return { error: `Unknown tool: ${toolName}` };
 }
 
-// Nova models plan out loud in <thinking> tags when tools are enabled.
+// Some models plan out loud in <thinking> tags when tools are enabled.
 // That is meant for the model, not the user — strip it from the final reply.
 function stripThinking(text) {
   return text.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim();
@@ -65,7 +92,7 @@ async function generateReply(name, message, abortSignal) {
   // so logs from two users chatting at once don't get mixed up.
   const requestId = crypto.randomUUID().slice(0, 8);
 
-  // The conversation Nova sees. It grows on every loop iteration.
+  // The conversation the model sees. It grows on every loop iteration.
   const messages = [
     {
       role: 'user',
@@ -74,7 +101,7 @@ async function generateReply(name, message, abortSignal) {
   ];
 
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration += 1) {
-    console.log(`[${requestId}] iteration ${iteration} -> calling Nova`);
+    console.log(`[${requestId}] iteration ${iteration} -> calling model`);
 
     const command = new ConverseCommand({
       modelId: config.bedrockModelId,
@@ -94,17 +121,17 @@ async function generateReply(name, message, abortSignal) {
         `(input ${response.usage.inputTokens} / output ${response.usage.outputTokens} tokens)`,
     );
 
-    // Whatever Nova replied becomes part of the conversation history.
+    // Whatever the model replied becomes part of the conversation history.
     messages.push(response.output.message);
 
     if (response.stopReason !== 'tool_use') {
-      // Nova is done — find the text block and return it.
+      // The model is done — find the text block and return it.
       const textBlock = response.output.message.content.find((block) => block.text);
       console.log(`[${requestId}] done after ${iteration} iteration(s)`);
       return { reply: textBlock ? stripThinking(textBlock.text) : '' };
     }
 
-    // Nova asked for one or more tools. Run each one and collect the results.
+    // The model asked for one or more tools. Run each one and collect the results.
     const toolResults = [];
 
     for (const block of response.output.message.content) {
@@ -117,7 +144,7 @@ async function generateReply(name, message, abortSignal) {
       try {
         result = await runTool(toolName, input);
       } catch (err) {
-        // Tool failures go back to Nova as data, so it can apologize or
+        // Tool failures go back to the model as data, so it can apologize or
         // try a different symbol instead of the whole request crashing.
         result = { error: err.message };
       }
@@ -126,18 +153,18 @@ async function generateReply(name, message, abortSignal) {
 
       toolResults.push({
         toolResult: {
-          toolUseId, // ticket number — matches this result to Nova's request
+          toolUseId, // ticket number — matches this result to the model's request
           content: [{ json: result }],
         },
       });
     }
 
     // Tool results are sent back as a "user" message, then the loop repeats
-    // and Nova reads the conversation again — now with the data it asked for.
+    // and the model reads the conversation again — now with the data it asked for.
     messages.push({ role: 'user', content: toolResults });
   }
 
-  // Only reached if Nova kept asking for tools MAX_ITERATIONS times in a row.
+  // Only reached if the model kept asking for tools MAX_ITERATIONS times in a row.
   console.log(`[${requestId}] gave up after ${MAX_ITERATIONS} iterations`);
   return { reply: 'Sorry, I could not finish answering that. Please try asking in a simpler way.' };
 }
