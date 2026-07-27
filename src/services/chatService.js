@@ -3,6 +3,7 @@ const { startObservation, propagateAttributes } = require('@langfuse/tracing');
 const crypto = require('node:crypto');
 const config = require('../config');
 const priceService = require('./priceService');
+const conversationService = require('./conversationService');
 
 const client = new BedrockRuntimeClient({ region: config.awsRegion });
 
@@ -95,9 +96,11 @@ const MAX_ITERATIONS = 5;
 //   generation = one model call (one iteration)
 //   tool       = one tool call like get_price
 // If the Langfuse keys are missing these lines simply do nothing.
-async function runLoop(requestId, message, abortSignal, trace) {
-  // The conversation the model sees. It grows on every loop iteration.
+async function runLoop(requestId, message, abortSignal, trace, history) {
+  // The conversation the model sees. It starts with whatever was already said
+  // in this session, then the new question, and it grows on every iteration.
   const messages = [
+    ...history,
     {
       role: 'user',
       content: [{ text: message }],
@@ -166,7 +169,8 @@ async function runLoop(requestId, message, abortSignal, trace) {
       // The model is done — find the text block and return it.
       const textBlock = response.output.message.content.find((block) => block.text);
       console.log(`[${requestId}] done after ${iteration} iteration(s)`);
-      return { reply: textBlock ? stripThinking(textBlock.text) : '' };
+      // messages goes back so the caller can save it as the new history.
+      return { reply: textBlock ? stripThinking(textBlock.text) : '', messages };
     }
 
     // The model asked for one or more tools. Run each one and collect the results.
@@ -208,24 +212,36 @@ async function runLoop(requestId, message, abortSignal, trace) {
   }
 
   // Only reached if the model kept asking for tools MAX_ITERATIONS times in a row.
+  // We do not return the messages here, so this half finished attempt is not
+  // saved into the history and cannot confuse the next question.
   console.log(`[${requestId}] gave up after ${MAX_ITERATIONS} iterations`);
   return { reply: 'Sorry, I could not finish answering that. Please try asking in a simpler way.' };
 }
 
-async function generateReply(name, message, abortSignal) {
+async function generateReply(name, message, sessionId, abortSignal) {
   // Short id to tag all log lines of this one chat request,
   // so logs from two users chatting at once don't get mixed up.
   const requestId = crypto.randomUUID().slice(0, 8);
 
-  // This puts the user's name on everything we send inside, so on the
-  // Langfuse dashboard we can filter by user and see the cost per user.
-  return propagateAttributes({ userId: name }, async () => {
+  // What was already said in this conversation. Empty on the first message.
+  const history = conversationService.getMessages(sessionId);
+  console.log(`[${requestId}] session ${sessionId} has ${history.length} old message(s)`);
+
+  // userId lets us filter by user in Langfuse, and sessionId makes Langfuse
+  // show the whole conversation together instead of separate single messages.
+  return propagateAttributes({ userId: name, sessionId }, async () => {
     const trace = startObservation('chat', { input: message });
 
     try {
-      const result = await runLoop(requestId, message, abortSignal, trace);
+      const result = await runLoop(requestId, message, abortSignal, trace, history);
+
+      // Only save when the loop finished properly and gave us the messages.
+      if (result.messages) {
+        conversationService.saveMessages(sessionId, result.messages);
+      }
+
       trace.update({ output: result.reply });
-      return result;
+      return { reply: result.reply };
     } catch (err) {
       trace.update({ level: 'ERROR', statusMessage: err.message });
       throw err;

@@ -27,6 +27,8 @@ const config = {
   bedrockMaxTokens: parsePositiveInteger(process.env.BEDROCK_MAX_TOKENS, 512),
   bedrockTemperature: parseTemperature(process.env.BEDROCK_TEMPERATURE, 0.7),
   bedrockRequestTimeoutMs: parsePositiveInteger(process.env.BEDROCK_REQUEST_TIMEOUT_MS, 25000),
+  maxHistoryMessages: parsePositiveInteger(process.env.MAX_HISTORY_MESSAGES, 20),
+  conversationTtlMs: parsePositiveInteger(process.env.CONVERSATION_TTL_MS, 30 * 60 * 1000),
   systemPrompt: 'You are a helpful assistant.',
 };
 

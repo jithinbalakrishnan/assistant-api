@@ -3,7 +3,7 @@ const config = require('../config');
 const chatService = require('../services/chatService');
 
 async function postChat(req, res, next) {
-  const { name, message } = req.body;
+  const { name, message, sessionId } = req.body;
 
   try {
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -12,6 +12,13 @@ async function postChat(req, res, next) {
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       throw new ApiError(400, '"message" is required and must be a non-empty string.');
+    }
+
+    // The sessionId tells us which conversation this message belongs to.
+    // We cannot use the name for this, because the same person can open two
+    // browser tabs and those two chats should not mix together.
+    if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
+      throw new ApiError(400, '"sessionId" is required and must be a non-empty string.');
     }
   } catch (err) {
     next(err);
@@ -39,6 +46,7 @@ async function postChat(req, res, next) {
     const result = await chatService.generateReply(
       name.trim(),
       message.trim(),
+      sessionId.trim(),
       abortController.signal,
     );
 
