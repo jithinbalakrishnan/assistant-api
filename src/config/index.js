@@ -31,6 +31,9 @@ const config = {
   // Leave KNOWLEDGE_BASE_ID empty to run without document search.
   knowledgeBaseId: (process.env.KNOWLEDGE_BASE_ID || '').trim(),
   ragTopK: parsePositiveInteger(process.env.RAG_TOP_K, 4),
+  // Leave GUARDRAIL_ID empty to run without a guardrail.
+  guardrailId: (process.env.GUARDRAIL_ID || '').trim(),
+  guardrailVersion: (process.env.GUARDRAIL_VERSION || '').trim(),
   conversationTtlMs: parsePositiveInteger(process.env.CONVERSATION_TTL_MS, 30 * 60 * 1000),
   systemPrompt: 'You are a helpful assistant.',
 };

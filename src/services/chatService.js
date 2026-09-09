@@ -120,6 +120,25 @@ function stripThinking(text) {
   return text.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim();
 }
 
+// A guardrail is a safety check that AWS runs outside the model, on the way in
+// and on the way out. A system prompt is only a request the model can be talked
+// out of, but a guardrail blocks things whatever the model decides to do.
+// Left undefined when GUARDRAIL_ID is empty, so the app still runs without one.
+const guardrailConfig = config.guardrailId
+  ? {
+      guardrailIdentifier: config.guardrailId,
+      // Must be a published version number. A DRAFT guardrail is rejected here.
+      guardrailVersion: config.guardrailVersion,
+      // Asks AWS to tell us WHY something was blocked, which we log below.
+      trace: 'enabled',
+    }
+  : undefined;
+
+// These two stop reasons both mean "AWS blocked this", not "the model answered".
+// Without this list they would fall into our normal success path and the user
+// would see an empty or confusing reply.
+const BLOCKED_STOP_REASONS = ['guardrail_intervened', 'content_filtered'];
+
 // Safety cap: a confused model could keep asking for tools forever,
 // and every loop iteration is a billed Bedrock call.
 const MAX_ITERATIONS = 5;
@@ -150,6 +169,8 @@ async function runLoop(requestId, message, abortSignal, trace, history) {
       system: [{ text: config.systemPrompt }],
       messages,
       toolConfig,
+      // Undefined when no guardrail is set up, and the SDK then ignores it.
+      guardrailConfig,
       inferenceConfig: {
         maxTokens: config.bedrockMaxTokens,
         temperature: config.bedrockTemperature,
@@ -196,6 +217,33 @@ async function runLoop(requestId, message, abortSignal, trace, history) {
       `[${requestId}] iteration ${iteration} <- stopReason: ${response.stopReason} ` +
         `(input ${response.usage.inputTokens} / output ${response.usage.outputTokens} tokens)`,
     );
+
+    // The guardrail blocked something. We stop here and do NOT save this turn
+    // into the history, so a blocked question cannot affect the next answer.
+    if (BLOCKED_STOP_REASONS.includes(response.stopReason)) {
+      // AWS puts its own "blocked" wording in the reply, which we show as is.
+      const blockedText = response.output.message.content.find((block) => block.text);
+
+      // The trace says which rule blocked it, for example a denied topic.
+      // Very useful while testing, because otherwise you only see "blocked".
+      console.log(
+        `[${requestId}] BLOCKED by guardrail:`,
+        JSON.stringify(response.trace?.guardrail ?? {}).slice(0, 400),
+      );
+
+      trace.update({
+        level: 'WARNING',
+        statusMessage: `Blocked by guardrail (${response.stopReason})`,
+        metadata: { guardrail: response.trace?.guardrail },
+      });
+
+      return {
+        reply:
+          blockedText?.text ||
+          'Sorry, I am not able to help with that request.',
+        blocked: true,
+      };
+    }
 
     // Whatever the model replied becomes part of the conversation history.
     messages.push(response.output.message);
