@@ -9,6 +9,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.1096.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1090.0",
     "@langfuse/otel": "^5.9.1",
     "@langfuse/tracing": "^5.9.1",

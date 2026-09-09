@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const config = require('../config');
 const priceService = require('./priceService');
 const conversationService = require('./conversationService');
+const knowledgeBaseService = require('./knowledgeBaseService');
 
 const client = new BedrockRuntimeClient({ region: config.awsRegion });
 
@@ -64,15 +65,49 @@ const toolConfig = {
   ],
 };
 
+// The document search tool only exists when a Knowledge Base is set up.
+// If we offered it without one, the model would try to use it and always fail.
+if (knowledgeBaseService.isConfigured) {
+  toolConfig.tools.push({
+    toolSpec: {
+      name: 'search_documents',
+      description: // the line between "what the report says" and "what the market says"
+        'Search our uploaded company documents, such as the SBI annual report. ' +
+        'Use this for what a company has REPORTED or WRITTEN: financial results, ' +
+        'strategy, risks, management commentary, business segments. ' +
+        'Do NOT use this for live market data — current share prices, crude oil or ' +
+        'currency rates come from get_price instead, because documents are not live.',
+      inputSchema: {
+        json: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description:
+                'What to look for in the documents, e.g. SBI digital banking strategy',
+            },
+          },
+          required: ['query'],
+        },
+      },
+    },
+  });
+}
+
 // Runs the tool the model asked for. When we add more tools later
 // (search_symbol, get_history, ...), they get dispatched from here.
-async function runTool(toolName, input) {
+async function runTool(toolName, input, abortSignal) {
   if (toolName === 'get_price') {
     return priceService.getPrice(input.symbol);
   }
 
   if (toolName === 'search_symbol') {
     return priceService.searchSymbol(input.query);
+  }
+
+  if (toolName === 'search_documents') {
+    // abortSignal is passed on so the search stops too when the user cancels.
+    return knowledgeBaseService.searchDocuments(input.query, abortSignal);
   }
 
   // The model asked for a tool we don't have — answer with an error instead of crashing.
@@ -186,7 +221,7 @@ async function runLoop(requestId, message, abortSignal, trace, history) {
 
       let result;
       try {
-        result = await runTool(toolName, input);
+        result = await runTool(toolName, input, abortSignal);
         toolSpan.update({ output: result });
       } catch (err) {
         // Tool failures go back to the model as data, so it can apologize or
